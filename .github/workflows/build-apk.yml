@@ -5,7 +5,10 @@ on:
   push:
     branches: [ main ]
     paths:
-      - 'DNV_Scan3D_V01.zip'
+      - 'app/**'
+      - 'build.gradle'
+      - 'settings.gradle'
+      - 'gradle.properties'
       - '.github/workflows/build-apk.yml'
 
 permissions:
@@ -38,21 +41,13 @@ jobs:
         with:
           gradle-version: '8.9'
 
-      - name: Extract Android project
-        run: |
-          rm -rf build_workspace
-          mkdir -p build_workspace
-          unzip -q DNV_Scan3D_V01.zip -d build_workspace
-          test -f build_workspace/DNV_Scan3D_V01/settings.gradle
-
       - name: Build debug APK
-        working-directory: build_workspace/DNV_Scan3D_V01
         run: gradle --no-daemon assembleDebug
 
       - name: Prepare APK
         run: |
           mkdir -p apk
-          cp build_workspace/DNV_Scan3D_V01/app/build/outputs/apk/debug/app-debug.apk apk/DNV-Scan3D-V01.apk
+          cp app/build/outputs/apk/debug/app-debug.apk apk/DNV-Scan3D-V01.apk
           ls -lh apk/DNV-Scan3D-V01.apk
 
       - name: Upload APK artifact
