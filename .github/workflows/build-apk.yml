@@ -1,0 +1,75 @@
+name: Build DNV Scan 3D APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+    paths:
+      - 'DNV_Scan3D_V01.zip'
+      - '.github/workflows/build-apk.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK 35
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Setup Gradle 8.9
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Extract Android project
+        run: |
+          rm -rf build_workspace
+          mkdir -p build_workspace
+          unzip -q DNV_Scan3D_V01.zip -d build_workspace
+          test -f build_workspace/DNV_Scan3D_V01/settings.gradle
+
+      - name: Build debug APK
+        working-directory: build_workspace/DNV_Scan3D_V01
+        run: gradle --no-daemon assembleDebug
+
+      - name: Prepare APK
+        run: |
+          mkdir -p apk
+          cp build_workspace/DNV_Scan3D_V01/app/build/outputs/apk/debug/app-debug.apk apk/DNV-Scan3D-V01.apk
+          ls -lh apk/DNV-Scan3D-V01.apk
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: DNV-Scan3D-V01-APK
+          path: apk/DNV-Scan3D-V01.apk
+          if-no-files-found: error
+
+      - name: Publish latest APK in repository
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add apk/DNV-Scan3D-V01.apk
+          if git diff --cached --quiet; then
+            echo "APK unchanged."
+          else
+            git commit -m "Build DNV Scan 3D V01 APK [skip ci]"
+            git push
+          fi
