@@ -73,16 +73,22 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
     private Sensor rotationSensor;
     private Sensor gyroSensor;
 
-    private float yawDeg = 0f;
+    // headingDeg representa a direção REAL do eixo óptico da câmera no plano horizontal.
+    // relativeYawDeg usa a direção inicial da sessão como 0°, evitando depender do norte magnético.
+    private float headingDeg = 0f;
+    private float relativeYawDeg = 0f;
     private float pitchDeg = 0f;
     private float rollDeg = 0f;
+    private float headingZeroDeg = 0f;
+    private boolean headingZeroReady = false;
+
     private float gyroSpeed = 999f;
     private long stableSince = 0L;
 
     private boolean scanning = false;
     private boolean captureBusy = false;
     private int ringIndex = 0;
-    private final boolean[] bins = new boolean[BINS_PER_RING];
+    private final boolean[][] ringBins = new boolean[RINGS][BINS_PER_RING];
     private final List<PhotoMeta> photos = new ArrayList<>();
     private File sessionDir;
     private File imagesDir;
@@ -150,9 +156,19 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
             Toast.makeText(this, "A câmera ainda está iniciando.", Toast.LENGTH_SHORT).show();
             return;
         }
+        if (rotationSensor == null) {
+            Toast.makeText(this, "Este celular não forneceu sensor de orientação.", Toast.LENGTH_LONG).show();
+            return;
+        }
+
         photos.clear();
         ringIndex = 0;
-        clearBins();
+        clearAllBins();
+        headingZeroDeg = headingDeg;
+        headingZeroReady = true;
+        relativeYawDeg = 0f;
+        stableSince = 0L;
+
         sessionDir = new File(getExternalFilesDir(Environment.DIRECTORY_PICTURES),
                 "DNVScan/session_" + new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(new Date()));
         imagesDir = new File(sessionDir, "images");
@@ -160,29 +176,61 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
             Toast.makeText(this, "Não consegui criar a pasta da sessão.", Toast.LENGTH_LONG).show();
             return;
         }
+
         scanning = true;
         btnStart.setEnabled(false);
         btnManual.setEnabled(true);
         btnFinish.setEnabled(true);
-        txtInstruction.setText("FAIXA BAIXA: caminhe ao redor da peça mantendo-a dentro da oval.");
+        txtInstruction.setText("FAIXA BAIXA: comece daqui e dê uma volta completa na peça.");
         updateUi();
     }
 
-    private void clearBins() {
-        for (int i = 0; i < bins.length; i++) bins[i] = false;
+    private void clearAllBins() {
+        for (int r = 0; r < RINGS; r++) {
+            for (int b = 0; b < BINS_PER_RING; b++) ringBins[r][b] = false;
+        }
+    }
+
+    private boolean[] currentBins() {
+        int safeRing = Math.max(0, Math.min(RINGS - 1, ringIndex));
+        return ringBins[safeRing];
+    }
+
+    private static float normalize360(float degrees) {
+        float value = degrees % 360f;
+        if (value < 0f) value += 360f;
+        return value;
+    }
+
+    private static float normalize180(float degrees) {
+        float value = normalize360(degrees);
+        if (value > 180f) value -= 360f;
+        return value;
     }
 
     private int currentBin() {
-        float normalized = yawDeg % 360f;
-        if (normalized < 0) normalized += 360f;
+        float normalized = normalize360(relativeYawDeg);
         int bin = (int) Math.floor(normalized / (360f / BINS_PER_RING));
         return Math.max(0, Math.min(BINS_PER_RING - 1, bin));
+    }
+
+    private int countBins(int ring) {
+        if (ring < 0 || ring >= RINGS) return 0;
+        int count = 0;
+        for (boolean filled : ringBins[ring]) if (filled) count++;
+        return count;
+    }
+
+    private int countAllBins() {
+        int total = 0;
+        for (int r = 0; r < RINGS; r++) total += countBins(r);
+        return total;
     }
 
     private void maybeAutoCapture() {
         if (!scanning || captureBusy || ringIndex >= RINGS) return;
         int bin = currentBin();
-        if (bins[bin]) return;
+        if (ringBins[ringIndex][bin]) return;
 
         long now = SystemClock.elapsedRealtime();
         if (gyroSpeed <= GYRO_STABLE_RAD_S) {
@@ -195,12 +243,26 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
 
     private void capturePhoto(boolean manual) {
         if (!scanning || imageCapture == null || captureBusy || ringIndex >= RINGS) return;
+
+        final int capturedRing = ringIndex;
         final int bin = currentBin();
-        if (!manual && bins[bin]) return;
+        if (ringBins[capturedRing][bin]) {
+            if (manual) {
+                runOnUiThread(() -> Toast.makeText(this,
+                        "Este setor já foi capturado. Gire mais um pouco ao redor da peça.", Toast.LENGTH_SHORT).show());
+            }
+            return;
+        }
+
+        final float capturedHeading = headingDeg;
+        final float capturedYaw = relativeYawDeg;
+        final float capturedPitch = pitchDeg;
+        final float capturedRoll = rollDeg;
 
         captureBusy = true;
         stableSince = 0L;
-        String fileName = String.format(Locale.US, "r%d_b%02d_%03d.jpg", ringIndex + 1, bin, photos.size() + 1);
+        String fileName = String.format(Locale.US, "r%d_b%02d_%03d.jpg",
+                capturedRing + 1, bin, photos.size() + 1);
         File outputFile = new File(imagesDir, fileName);
         ImageCapture.OutputFileOptions options = new ImageCapture.OutputFileOptions.Builder(outputFile).build();
 
@@ -208,12 +270,13 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
             @Override
             public void onImageSaved(@NonNull ImageCapture.OutputFileResults outputFileResults) {
                 long ts = System.currentTimeMillis();
-                photos.add(new PhotoMeta(fileName, ts, ringIndex, bin, yawDeg, pitchDeg, rollDeg, manual));
-                bins[bin] = true;
+                photos.add(new PhotoMeta(fileName, ts, capturedRing, bin,
+                        capturedHeading, capturedYaw, capturedPitch, capturedRoll, manual));
+                ringBins[capturedRing][bin] = true;
                 captureBusy = false;
                 runOnUiThread(() -> {
                     updateUi();
-                    if (countBins() >= BINS_PER_RING) advanceRing();
+                    if (capturedRing == ringIndex && countBins(ringIndex) >= BINS_PER_RING) advanceRing();
                 });
             }
 
@@ -226,19 +289,14 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
         });
     }
 
-    private int countBins() {
-        int c = 0;
-        for (boolean b : bins) if (b) c++;
-        return c;
-    }
-
     private void advanceRing() {
         ringIndex++;
-        clearBins();
+        stableSince = 0L;
+
         if (ringIndex == 1) {
-            txtInstruction.setText("FAIXA MÉDIA: câmera na altura do centro da peça. Dê outra volta.");
+            txtInstruction.setText("FAIXA MÉDIA: câmera na altura do centro. Volte ao ponto inicial e dê outra volta.");
         } else if (ringIndex == 2) {
-            txtInstruction.setText("FAIXA ALTA: câmera acima da peça, levemente inclinada para baixo.");
+            txtInstruction.setText("FAIXA ALTA: câmera acima da peça, inclinada para baixo. Dê a última volta.");
         } else {
             scanning = false;
             txtInstruction.setText("CAPTURA COMPLETA. Toque em FINALIZAR para gerar o pacote.");
@@ -249,13 +307,22 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
     }
 
     private void updateUi() {
-        int count = photos.size();
-        txtCounter.setText(count + " / " + TARGET_PHOTOS + " fotos");
-        progressScan.setProgress(Math.min(TARGET_PHOTOS, count));
+        int occupied = countAllBins();
+        txtCounter.setText(occupied + " / " + TARGET_PHOTOS + " posições");
+        progressScan.setProgress(Math.min(TARGET_PHOTOS, occupied));
+
+        int shownRing = Math.min(ringIndex, RINGS - 1);
+        int currentRingCount = countBins(shownRing);
         txtTelemetry.setText(String.format(Locale.getDefault(),
-                "Faixa %d/3 • setor %02d/24 • yaw %.0f° • pitch %.0f° • movimento %.2f rad/s",
-                Math.min(ringIndex + 1, 3), currentBin() + 1, yawDeg, pitchDeg, gyroSpeed));
-        overlayView.update(bins, ringIndex);
+                "Faixa %d/3: %02d/24 • setor %02d/24 • volta %.0f° • inclinação %.0f° • mov. %.2f rad/s",
+                shownRing + 1,
+                currentRingCount,
+                currentBin() + 1,
+                relativeYawDeg,
+                pitchDeg,
+                gyroSpeed));
+
+        overlayView.update(currentBins(), shownRing);
     }
 
     private void finishScan() {
@@ -272,7 +339,7 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
                 writeMetadata();
                 File zip = zipSession();
                 runOnUiThread(() -> {
-                    txtInstruction.setText("Pacote pronto: " + photos.size() + " fotos. Compartilhe com o PC.");
+                    txtInstruction.setText("Pacote pronto: " + photos.size() + " fotos em " + countAllBins() + " posições.");
                     btnStart.setEnabled(true);
                     shareZip(zip);
                 });
@@ -287,17 +354,20 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
         try (Writer w = new OutputStreamWriter(new FileOutputStream(meta), StandardCharsets.UTF_8)) {
             w.write("{\n");
             w.write("  \"app\": \"DNV Scan 3D\",\n");
-            w.write("  \"version\": \"0.1.0\",\n");
+            w.write("  \"version\": \"0.2.0\",\n");
+            w.write("  \"orientationMode\": \"camera-forward-relative\",\n");
+            w.write(String.format(Locale.US, "  \"headingZero\": %.3f,\n", headingZeroDeg));
             w.write("  \"createdAt\": " + System.currentTimeMillis() + ",\n");
             w.write("  \"rings\": 3,\n");
             w.write("  \"binsPerRing\": 24,\n");
+            w.write("  \"coverage\": [" + countBins(0) + "," + countBins(1) + "," + countBins(2) + "],\n");
             w.write("  \"photos\": [\n");
             for (int i = 0; i < photos.size(); i++) {
                 PhotoMeta p = photos.get(i);
                 w.write(String.format(Locale.US,
-                        "    {\"file\":\"%s\",\"timestamp\":%d,\"ring\":%d,\"bin\":%d,\"yaw\":%.3f,\"pitch\":%.3f,\"roll\":%.3f,\"manual\":%s}%s\n",
-                        p.file, p.timestamp, p.ring, p.bin, p.yaw, p.pitch, p.roll, p.manual ? "true" : "false",
-                        i == photos.size() - 1 ? "" : ","));
+                        "    {\"file\":\"%s\",\"timestamp\":%d,\"ring\":%d,\"bin\":%d,\"heading\":%.3f,\"yaw\":%.3f,\"pitch\":%.3f,\"roll\":%.3f,\"manual\":%s}%s\n",
+                        p.file, p.timestamp, p.ring, p.bin, p.heading, p.yaw, p.pitch, p.roll,
+                        p.manual ? "true" : "false", i == photos.size() - 1 ? "" : ","));
             }
             w.write("  ]\n}\n");
         }
@@ -356,10 +426,28 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
             float[] rotation = new float[9];
             float[] orientation = new float[3];
             SensorManager.getRotationMatrixFromVector(rotation, event.values);
+
+            // Android entrega a matriz que transforma coordenadas do aparelho para o mundo.
+            // A câmera traseira olha aproximadamente no eixo -Z do aparelho. Transformando
+            // esse vetor obtemos a direção para a qual a câmera realmente aponta, mesmo
+            // com o telefone em pé, inclinado ou em landscape.
+            float forwardEast = -rotation[2];
+            float forwardNorth = -rotation[5];
+            float forwardUp = -rotation[8];
+            float horizontal = (float) Math.sqrt(forwardEast * forwardEast + forwardNorth * forwardNorth);
+
+            if (horizontal > 0.0001f) {
+                headingDeg = normalize360((float) Math.toDegrees(Math.atan2(forwardEast, forwardNorth)));
+                pitchDeg = (float) Math.toDegrees(Math.atan2(forwardUp, horizontal));
+            }
+
             SensorManager.getOrientation(rotation, orientation);
-            yawDeg = (float) Math.toDegrees(orientation[0]);
-            pitchDeg = (float) Math.toDegrees(orientation[1]);
-            rollDeg = (float) Math.toDegrees(orientation[2]);
+            rollDeg = normalize180((float) Math.toDegrees(orientation[2]));
+
+            if (scanning && headingZeroReady) {
+                relativeYawDeg = normalize360(headingDeg - headingZeroDeg);
+            }
+
             runOnUiThread(this::updateUi);
             maybeAutoCapture();
         } else if (event.sensor.getType() == Sensor.TYPE_GYROSCOPE) {
@@ -383,16 +471,19 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
         final long timestamp;
         final int ring;
         final int bin;
+        final float heading;
         final float yaw;
         final float pitch;
         final float roll;
         final boolean manual;
 
-        PhotoMeta(String file, long timestamp, int ring, int bin, float yaw, float pitch, float roll, boolean manual) {
+        PhotoMeta(String file, long timestamp, int ring, int bin, float heading, float yaw,
+                  float pitch, float roll, boolean manual) {
             this.file = file;
             this.timestamp = timestamp;
             this.ring = ring;
             this.bin = bin;
+            this.heading = heading;
             this.yaw = yaw;
             this.pitch = pitch;
             this.roll = roll;
